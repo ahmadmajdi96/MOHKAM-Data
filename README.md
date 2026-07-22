@@ -20,6 +20,7 @@ The service runs multiple year shards in parallel and fetches details with high 
 
 ```env
 MOHKAM_TARGET_HOST_UTILIZATION=0.90
+MOHKAM_ALLOW_UNSAFE_SPEED=false
 MOHKAM_YEAR_WORKERS=3
 MOHKAM_DETAIL_CONCURRENCY_PER_YEAR=24
 MOHKAM_GLOBAL_REQUEST_LIMIT=48
@@ -44,6 +45,8 @@ MOHKAM_YEAR_START_STAGGER_SECONDS=15
 If the site starts returning many `403` or `429`, reduce `MOHKAM_YEAR_WORKERS` first, then reduce `MOHKAM_GLOBAL_REQUEST_LIMIT`.
 
 If the error happens before any data is retrieved, it is usually a login/startup connection burst. Start with the safe profile above, confirm records are being written, then increase `MOHKAM_YEAR_WORKERS` and `MOHKAM_GLOBAL_REQUEST_LIMIT` gradually.
+
+By default the scraper clamps unsafe `.env` speed values to prevent startup connection storms. To intentionally bypass those caps, set `MOHKAM_ALLOW_UNSAFE_SPEED=true`, but only after the safe profile writes data successfully.
 
 Data is written locally to:
 

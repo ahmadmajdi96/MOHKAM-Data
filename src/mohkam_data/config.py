@@ -18,6 +18,19 @@ def env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def cap_unless_unsafe(value: int, safe_max: int) -> int:
+    if ALLOW_UNSAFE_SPEED:
+        return value
+    return min(value, safe_max)
+
+
 def auto_cpu_count() -> int:
     try:
         return len(os.sched_getaffinity(0))
@@ -45,10 +58,11 @@ PARENT = -1
 
 HOST_CPU_COUNT = auto_cpu_count()
 TARGET_HOST_UTILIZATION = env_float("MOHKAM_TARGET_HOST_UTILIZATION", 0.90)
-YEAR_WORKERS = env_int("MOHKAM_YEAR_WORKERS", max(1, min(3, int(HOST_CPU_COUNT * TARGET_HOST_UTILIZATION / 2))))
-DETAIL_CONCURRENCY_PER_YEAR = env_int("MOHKAM_DETAIL_CONCURRENCY_PER_YEAR", max(8, min(24, int(HOST_CPU_COUNT * TARGET_HOST_UTILIZATION * 2))))
-GLOBAL_REQUEST_LIMIT = env_int("MOHKAM_GLOBAL_REQUEST_LIMIT", max(12, min(48, int(HOST_CPU_COUNT * TARGET_HOST_UTILIZATION * 4))))
-MAX_DETAIL_CONCURRENCY = env_int("MOHKAM_MAX_DETAIL_CONCURRENCY", 128)
+ALLOW_UNSAFE_SPEED = env_bool("MOHKAM_ALLOW_UNSAFE_SPEED", False)
+YEAR_WORKERS = cap_unless_unsafe(env_int("MOHKAM_YEAR_WORKERS", max(1, min(3, int(HOST_CPU_COUNT * TARGET_HOST_UTILIZATION / 2)))), 3)
+DETAIL_CONCURRENCY_PER_YEAR = cap_unless_unsafe(env_int("MOHKAM_DETAIL_CONCURRENCY_PER_YEAR", max(8, min(24, int(HOST_CPU_COUNT * TARGET_HOST_UTILIZATION * 2)))), 24)
+GLOBAL_REQUEST_LIMIT = cap_unless_unsafe(env_int("MOHKAM_GLOBAL_REQUEST_LIMIT", max(12, min(48, int(HOST_CPU_COUNT * TARGET_HOST_UTILIZATION * 4)))), 48)
+MAX_DETAIL_CONCURRENCY = cap_unless_unsafe(env_int("MOHKAM_MAX_DETAIL_CONCURRENCY", 128), 128)
 MIN_DETAIL_CONCURRENCY = env_int("MOHKAM_MIN_DETAIL_CONCURRENCY", 8)
 PAGE_DELAY_SECONDS = env_float("MOHKAM_PAGE_DELAY_SECONDS", 0.0)
 MIN_REQUEST_DELAY_SECONDS = env_float("MOHKAM_MIN_REQUEST_DELAY_SECONDS", 0.0)
