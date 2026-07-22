@@ -30,6 +30,10 @@ class RateLimitedError(RuntimeError):
         self.status_code = status_code
 
 
+class UnverifiedEmptyPageError(RuntimeError):
+    pass
+
+
 def ensure_dirs() -> None:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     config.STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -315,11 +319,12 @@ def is_verified_no_results_html(html_text: str) -> bool:
     return "لا توجد نتائج لعوامل البحث المختارة" in normalized
 
 
-def archive_suspicious_empty_page(year: int, page: int, html_text: str) -> None:
-    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    path = config.LOG_DIR / f"suspicious_empty_year_{year}_page_{page}_{int(time.time())}.html"
-    path.write_text(html_text, encoding="utf-8", errors="ignore")
-    print(f"[empty-suspicious] year={year} page={page} archived={path}", flush=True)
+def report_suspicious_empty_page(year: int, page: int, parent: int, court_id: str | None) -> None:
+    print(
+        f"[empty-suspicious] year={year} parent={parent} court={court_id or '-'} page={page} "
+        "empty parser output without verified no-results marker",
+        flush=True,
+    )
 
 
 def fetch_page(session: requests.Session, page: int, year: int, parent: int, court_id: str | None = None) -> tuple[list[dict[str, Any]], str]:
@@ -336,8 +341,8 @@ def confirm_empty_page(
     html_text: str,
 ) -> list[dict[str, Any]]:
     if not is_verified_no_results_html(html_text):
-        archive_suspicious_empty_page(year, page, html_text)
-        raise RuntimeError(f"Empty parse without verified no-results marker for year={year} page={page}")
+        report_suspicious_empty_page(year, page, parent, court_id)
+        raise UnverifiedEmptyPageError(f"Empty parse without verified no-results marker for year={year} page={page}")
 
     for attempt in range(1, config.EMPTY_PAGE_CONFIRMATIONS + 1):
         if config.EMPTY_PAGE_RETRY_SECONDS > 0:
@@ -351,8 +356,8 @@ def confirm_empty_page(
         if records:
             return records
         if not is_verified_no_results_html(retry_html):
-            archive_suspicious_empty_page(year, page, retry_html)
-            raise RuntimeError(f"Empty retry without verified no-results marker for year={year} page={page}")
+            report_suspicious_empty_page(year, page, parent, court_id)
+            raise UnverifiedEmptyPageError(f"Empty retry without verified no-results marker for year={year} page={page}")
     return []
 
 
@@ -412,7 +417,17 @@ def scrape_year(year: int, parent: int = config.PARENT, court_id: str | None = N
             continue
 
         if not page_records:
-            page_records = confirm_empty_page(session, page, year, parent, court_id, page_html)
+            try:
+                page_records = confirm_empty_page(session, page, year, parent, court_id, page_html)
+            except UnverifiedEmptyPageError as exc:
+                print(
+                    f"[retry-empty] year={year} parent={parent} court={court_id or '-'} page={page} "
+                    f"error={exc} sleep={config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS:.1f}s",
+                    flush=True,
+                )
+                if config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS > 0:
+                    time.sleep(config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS)
+                continue
 
         if not page_records:
             completion_reason = "no_records"

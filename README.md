@@ -20,7 +20,7 @@ The service runs multiple year shards in parallel and fetches details with high 
 
 ```env
 MOHKAM_TARGET_HOST_UTILIZATION=0.90
-MOHKAM_COURT_SHARDS=auto
+MOHKAM_COURT_SHARDS=none
 MOHKAM_MAX_COURT_SHARDS=0
 MOHKAM_PARENT_SHARDS=1,2,3,6
 MOHKAM_ALLOW_UNSAFE_SPEED=false
@@ -31,8 +31,11 @@ MOHKAM_MAX_DETAIL_CONCURRENCY=128
 MOHKAM_MIN_REQUEST_DELAY_SECONDS=0
 MOHKAM_MAX_REQUEST_DELAY_SECONDS=0.10
 MOHKAM_PAGE_DELAY_SECONDS=0
-MOHKAM_YEAR_START_STAGGER_SECONDS=8
+MOHKAM_YEAR_START_STAGGER_SECONDS=0
 MOHKAM_LOGIN_RETRY_PAUSE_SECONDS=60
+MOHKAM_EMPTY_PAGE_CONFIRMATIONS=1
+MOHKAM_EMPTY_PAGE_RETRY_SECONDS=0
+MOHKAM_UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS=2
 ```
 
 `MOHKAM_GLOBAL_REQUEST_LIMIT` is the most important safety valve. If you see repeated `Max retries exceeded`, `ConnectTimeoutError`, or `Read timed out`, lower it first:
@@ -42,28 +45,21 @@ MOHKAM_GLOBAL_REQUEST_LIMIT=16
 MOHKAM_YEAR_WORKERS=1
 MOHKAM_DETAIL_CONCURRENCY_PER_YEAR=12
 MOHKAM_MAX_REQUEST_DELAY_SECONDS=0.25
-MOHKAM_YEAR_START_STAGGER_SECONDS=15
+MOHKAM_YEAR_START_STAGGER_SECONDS=5
 ```
 
 If the site starts returning many `403` or `429`, reduce `MOHKAM_YEAR_WORKERS` first, then reduce `MOHKAM_GLOBAL_REQUEST_LIMIT`.
 
-The scraper runs each year across court shards (`advCId`) by default. This is important because broad year or parent-filter searches can return a verified `no_records` page after the result window is exhausted, even when the year still contains more records under finer court filters. `MOHKAM_COURT_SHARDS=auto` discovers the Jordan court list from Qistas at startup and creates separate durable checkpoints like `qistas_state_2017_court_4_1_0_12_1.json`.
+The scraper runs each year across parent shards (`pc`) by default. This keeps the main run fast and avoids exploding the job into hundreds of court shards.
 
-If you want to disable court sharding and fall back to parent shards (`pc`), set:
-
-```env
-MOHKAM_COURT_SHARDS=none
-MOHKAM_PARENT_SHARDS=1,2,3,6
-```
-
-For small smoke tests, limit auto-discovered courts:
+Court sharding (`advCId`) is available only as a targeted fallback for years that hit a saturated result window. Do not enable it for the normal full run unless you explicitly want the slower exhaustive mode:
 
 ```env
 MOHKAM_COURT_SHARDS=auto
 MOHKAM_MAX_COURT_SHARDS=2
 ```
 
-If a shard reaches a saturated result window and then receives an empty page, it is marked `needs_review` with `completion_reason=ambiguous_no_records_after_large_window` instead of being silently completed.
+If a shard reaches a saturated result window and then receives an empty page, it is marked `needs_review` with `completion_reason=ambiguous_no_records_after_large_window` instead of being silently completed. The scraper does not save HTML pages for this condition.
 
 If the error happens before any data is retrieved, it is usually a login/startup connection burst. Start with the safe profile above, confirm records are being written, then increase `MOHKAM_YEAR_WORKERS` and `MOHKAM_GLOBAL_REQUEST_LIMIT` gradually.
 
