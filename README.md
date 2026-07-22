@@ -113,44 +113,6 @@ Data is written locally to:
 docker compose run --rm monitor
 ```
 
-## Raw HTML Archive Service
-
-The raw HTML service is separate from the JSON scraper and uses `docker-compose.raw.yml`. It saves compressed search-result HTML and, by default, compressed detail-page HTML, then tracks everything in a SQLite manifest.
-
-```bash
-docker compose -f docker-compose.raw.yml up -d --build
-docker compose -f docker-compose.raw.yml logs -f mohkam-raw-html
-```
-
-Raw files are written locally under:
-
-```text
-./data/raw_html/search/year=2017/parent=1/court=none/page=0000001.html.gz
-./data/raw_html/details/bucket=459/6361459_2.html.gz
-./data/state/raw_html_state.sqlite3
-./data/logs/raw_html_failed.jsonl
-```
-
-Monitor the raw archive:
-
-```bash
-docker compose -f docker-compose.raw.yml run --rm raw-monitor
-```
-
-Useful raw settings:
-
-```env
-MOHKAM_RAW_FETCH_DETAILS=true
-MOHKAM_RAW_SEARCH_PAGE_CAP=0
-MOHKAM_RAW_DETAIL_WORKERS=24
-MOHKAM_RAW_COMPRESSLEVEL=5
-MOHKAM_RAW_EMPTY_PAUSE_SECONDS=8
-MOHKAM_RAW_EMPTY_MAX_RETRIES=3
-MOHKAM_RAW_DETAIL_MAX_RETRIES=3
-```
-
-For a tiny smoke test, set `MOHKAM_RAW_SEARCH_PAGE_CAP=1`; for the full archive, keep it `0`.
-
 ## Stop / Resume
 
 ```bash
