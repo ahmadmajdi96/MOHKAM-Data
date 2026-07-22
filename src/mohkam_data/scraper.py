@@ -31,7 +31,9 @@ class RateLimitedError(RuntimeError):
 
 
 class UnverifiedEmptyPageError(RuntimeError):
-    pass
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def ensure_dirs() -> None:
@@ -319,11 +321,23 @@ def is_verified_no_results_html(html_text: str) -> bool:
     return "لا توجد نتائج لعوامل البحث المختارة" in normalized
 
 
-def report_suspicious_empty_page(year: int, page: int, parent: int, court_id: str | None) -> None:
-    print(
-        f"[empty-suspicious] year={year} parent={parent} court={court_id or '-'} page={page} "
-        "empty parser output without verified no-results marker",
-        flush=True,
+def classify_unverified_empty_html(html_text: str) -> str:
+    normalized = normalize_text(re.sub(r"<[^>]+>", " ", html_text)).lower()
+    if "your browser does not support the video tag" in normalized or "browser does not support the video tag" in normalized:
+        return "layout_shell_video"
+    if "userpassword" in html_text or "name=\"username\"" in html_text or "/ar/authinticate" in html_text:
+        return "login_page"
+    if "الرجاء الانتظار" in normalized or "please wait" in normalized:
+        return "wait_page"
+    return "unrecognized_empty_page"
+
+
+def raise_unverified_empty_page(year: int, page: int, parent: int, court_id: str | None, html_text: str, retry: bool = False) -> None:
+    reason = classify_unverified_empty_html(html_text)
+    phase = "retry" if retry else "initial"
+    raise UnverifiedEmptyPageError(
+        reason,
+        f"Unverified empty {phase} page reason={reason} year={year} parent={parent} court={court_id or '-'} page={page}",
     )
 
 
@@ -341,8 +355,7 @@ def confirm_empty_page(
     html_text: str,
 ) -> list[dict[str, Any]]:
     if not is_verified_no_results_html(html_text):
-        report_suspicious_empty_page(year, page, parent, court_id)
-        raise UnverifiedEmptyPageError(f"Empty parse without verified no-results marker for year={year} page={page}")
+        raise_unverified_empty_page(year, page, parent, court_id, html_text)
 
     for attempt in range(1, config.EMPTY_PAGE_CONFIRMATIONS + 1):
         if config.EMPTY_PAGE_RETRY_SECONDS > 0:
@@ -356,8 +369,7 @@ def confirm_empty_page(
         if records:
             return records
         if not is_verified_no_results_html(retry_html):
-            report_suspicious_empty_page(year, page, parent, court_id)
-            raise UnverifiedEmptyPageError(f"Empty retry without verified no-results marker for year={year} page={page}")
+            raise_unverified_empty_page(year, page, parent, court_id, retry_html, retry=True)
     return []
 
 
@@ -403,6 +415,7 @@ def scrape_year(year: int, parent: int = config.PARENT, court_id: str | None = N
     existing_keys = load_keys()
     print(f"[dedupe] loaded {len(existing_keys)} keys", flush=True)
     page = int(state.get("last_completed_page", 0)) + 1
+    unverified_empty_retries = 0
 
     while config.YEAR_COMPLETION_PAGE_CAP <= 0 or page <= config.YEAR_COMPLETION_PAGE_CAP:
         try:
@@ -420,13 +433,23 @@ def scrape_year(year: int, parent: int = config.PARENT, court_id: str | None = N
             try:
                 page_records = confirm_empty_page(session, page, year, parent, court_id, page_html)
             except UnverifiedEmptyPageError as exc:
+                unverified_empty_retries += 1
+                if unverified_empty_retries >= config.UNVERIFIED_EMPTY_PAGE_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"Too many unverified empty pages year={year} parent={parent} "
+                        f"court={court_id or '-'} page={page} reason={exc.reason} retries={unverified_empty_retries}"
+                    ) from exc
+                sleep_for = config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS * unverified_empty_retries
                 print(
-                    f"[retry-empty] year={year} parent={parent} court={court_id or '-'} page={page} "
-                    f"error={exc} sleep={config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS:.1f}s",
+                    f"[bad-page] year={year} parent={parent} court={court_id or '-'} page={page} "
+                    f"attempt={unverified_empty_retries}/{config.UNVERIFIED_EMPTY_PAGE_MAX_RETRIES} "
+                    f"reason={exc.reason} sleep={sleep_for:.1f}s relogin={config.RELOGIN_ON_UNVERIFIED_EMPTY}",
                     flush=True,
                 )
-                if config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS > 0:
-                    time.sleep(config.UNVERIFIED_EMPTY_PAGE_PAUSE_SECONDS)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                if config.RELOGIN_ON_UNVERIFIED_EMPTY:
+                    session = login()
                 continue
 
         if not page_records:
@@ -452,6 +475,7 @@ def scrape_year(year: int, parent: int = config.PARENT, court_id: str | None = N
             print(f"[complete] year={year} parent={parent} court={court_id or '-'} reason={completion_reason} page={page}", flush=True)
             return
 
+        unverified_empty_retries = 0
         before = len(page_records)
         page_records = [record for record in page_records if record_key(record) not in existing_keys]
         state["skipped_duplicates"] = int(state.get("skipped_duplicates", 0)) + (before - len(page_records))
