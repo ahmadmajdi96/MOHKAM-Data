@@ -21,6 +21,7 @@ from . import config
 OUTPUT_LOCK = threading.Lock()
 KEYS_LOCK = threading.Lock()
 FAILED_DETAILS_LOCK = threading.Lock()
+REQUEST_SEMAPHORE = threading.BoundedSemaphore(config.GLOBAL_REQUEST_LIMIT)
 
 
 class RateLimitedError(RuntimeError):
@@ -36,8 +37,7 @@ def ensure_dirs() -> None:
 
 
 def adaptive_concurrency() -> int:
-    cpu_count = psutil.cpu_count(logical=True) or config.HOST_CPU_COUNT
-    calculated = max(config.MIN_DETAIL_CONCURRENCY, config.DETAIL_CONCURRENCY_PER_YEAR, int(cpu_count * config.TARGET_HOST_UTILIZATION * 8))
+    calculated = max(config.MIN_DETAIL_CONCURRENCY, config.DETAIL_CONCURRENCY_PER_YEAR)
     return min(config.MAX_DETAIL_CONCURRENCY, calculated)
 
 
@@ -97,7 +97,8 @@ def request_with_retries(session: requests.Session, method: str, url: str, **kwa
     timeout = kwargs.pop("timeout", (config.CONNECT_TIMEOUT_SECONDS, config.READ_TIMEOUT_SECONDS))
     for attempt in range(1, config.MAX_RETRIES + 1):
         try:
-            response = session.request(method, url, timeout=timeout, **kwargs)
+            with REQUEST_SEMAPHORE:
+                response = session.request(method, url, timeout=timeout, **kwargs)
             if response.status_code in (403, 429):
                 raise RateLimitedError(response.status_code)
             response.raise_for_status()
