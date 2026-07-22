@@ -5,6 +5,7 @@ import json
 import random
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -15,6 +16,11 @@ import psutil
 import requests
 
 from . import config
+
+
+OUTPUT_LOCK = threading.Lock()
+KEYS_LOCK = threading.Lock()
+FAILED_DETAILS_LOCK = threading.Lock()
 
 
 class RateLimitedError(RuntimeError):
@@ -30,12 +36,14 @@ def ensure_dirs() -> None:
 
 
 def adaptive_concurrency() -> int:
-    cpu_count = psutil.cpu_count(logical=True) or 4
-    calculated = max(config.MIN_DETAIL_CONCURRENCY, int(cpu_count * config.TARGET_HOST_UTILIZATION * 8))
+    cpu_count = psutil.cpu_count(logical=True) or config.HOST_CPU_COUNT
+    calculated = max(config.MIN_DETAIL_CONCURRENCY, config.DETAIL_CONCURRENCY_PER_YEAR, int(cpu_count * config.TARGET_HOST_UTILIZATION * 8))
     return min(config.MAX_DETAIL_CONCURRENCY, calculated)
 
 
 def sleep_jitter() -> None:
+    if config.MAX_REQUEST_DELAY_SECONDS <= 0:
+        return
     time.sleep(random.uniform(config.MIN_REQUEST_DELAY_SECONDS, config.MAX_REQUEST_DELAY_SECONDS))
 
 
@@ -194,20 +202,22 @@ def record_key(record: dict[str, Any]) -> tuple[str, str]:
 
 def load_keys() -> set[tuple[str, str]]:
     keys: set[tuple[str, str]] = set()
-    if config.KEYS_FILE.exists():
-        with config.KEYS_FILE.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                parts = line.strip().split("\t", 1)
-                if len(parts) == 2 and all(parts):
-                    keys.add((parts[0], parts[1]))
+    with KEYS_LOCK:
+        if config.KEYS_FILE.exists():
+            with config.KEYS_FILE.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    parts = line.strip().split("\t", 1)
+                    if len(parts) == 2 and all(parts):
+                        keys.add((parts[0], parts[1]))
     return keys
 
 
 def append_key(key: tuple[str, str]) -> None:
     if not all(key):
         return
-    with config.KEYS_FILE.open("a", encoding="utf-8") as handle:
-        handle.write(f"{key[0]}\t{key[1]}\n")
+    with KEYS_LOCK:
+        with config.KEYS_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(f"{key[0]}\t{key[1]}\n")
 
 
 def state_path(year: int) -> Path:
@@ -242,8 +252,9 @@ def append_failed_detail(year: int, page: int, record: dict[str, Any], error: Ex
         "error": str(error),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
-    with config.FAILED_DETAILS_FILE.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    with FAILED_DETAILS_LOCK:
+        with config.FAILED_DETAILS_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def clone_session(session: requests.Session) -> requests.Session:
@@ -320,18 +331,17 @@ def scrape_year(year: int) -> None:
                         enriched.append(detail)
 
         written_this_page = 0
-        with config.OUTPUT_FILE.open("a", encoding="utf-8") as output:
-            for record in enriched:
-                record["_year"] = year
-                record["_page"] = page
-                output.write(json.dumps(record, ensure_ascii=False) + "\n")
-                output.flush()
-                key = record_key(record)
-                if all(key):
-                    existing_keys.add(key)
-                    append_key(key)
-                written_this_page += 1
-                sleep_jitter()
+        with OUTPUT_LOCK:
+            with config.OUTPUT_FILE.open("a", encoding="utf-8") as output:
+                for record in enriched:
+                    record["_year"] = year
+                    record["_page"] = page
+                    output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    key = record_key(record)
+                    if all(key):
+                        existing_keys.add(key)
+                        append_key(key)
+                    written_this_page += 1
 
         state.update(
             {

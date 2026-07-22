@@ -14,6 +14,22 @@ docker compose up -d --build
 docker compose logs -f mohkam-scraper
 ```
 
+## High-Speed Mode
+
+The service runs multiple year shards in parallel and fetches details with high thread concurrency. For a Core i7 14th gen / 32 GB RAM machine, start with:
+
+```env
+MOHKAM_TARGET_HOST_UTILIZATION=0.90
+MOHKAM_YEAR_WORKERS=8
+MOHKAM_DETAIL_CONCURRENCY_PER_YEAR=96
+MOHKAM_MAX_DETAIL_CONCURRENCY=256
+MOHKAM_MIN_REQUEST_DELAY_SECONDS=0
+MOHKAM_MAX_REQUEST_DELAY_SECONDS=0.02
+MOHKAM_PAGE_DELAY_SECONDS=0
+```
+
+If the site starts returning many `403`, `429`, read timeouts, or connection timeouts, reduce `MOHKAM_YEAR_WORKERS` first, then reduce `MOHKAM_DETAIL_CONCURRENCY_PER_YEAR`.
+
 Data is written locally to:
 
 ```text
