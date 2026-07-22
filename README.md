@@ -20,6 +20,9 @@ The service runs multiple year shards in parallel and fetches details with high 
 
 ```env
 MOHKAM_TARGET_HOST_UTILIZATION=0.90
+MOHKAM_COURT_SHARDS=auto
+MOHKAM_MAX_COURT_SHARDS=0
+MOHKAM_PARENT_SHARDS=1,2,3,6
 MOHKAM_ALLOW_UNSAFE_SPEED=false
 MOHKAM_YEAR_WORKERS=3
 MOHKAM_DETAIL_CONCURRENCY_PER_YEAR=24
@@ -43,6 +46,24 @@ MOHKAM_YEAR_START_STAGGER_SECONDS=15
 ```
 
 If the site starts returning many `403` or `429`, reduce `MOHKAM_YEAR_WORKERS` first, then reduce `MOHKAM_GLOBAL_REQUEST_LIMIT`.
+
+The scraper runs each year across court shards (`advCId`) by default. This is important because broad year or parent-filter searches can return a verified `no_records` page after the result window is exhausted, even when the year still contains more records under finer court filters. `MOHKAM_COURT_SHARDS=auto` discovers the Jordan court list from Qistas at startup and creates separate durable checkpoints like `qistas_state_2017_court_4_1_0_12_1.json`.
+
+If you want to disable court sharding and fall back to parent shards (`pc`), set:
+
+```env
+MOHKAM_COURT_SHARDS=none
+MOHKAM_PARENT_SHARDS=1,2,3,6
+```
+
+For small smoke tests, limit auto-discovered courts:
+
+```env
+MOHKAM_COURT_SHARDS=auto
+MOHKAM_MAX_COURT_SHARDS=2
+```
+
+If a shard reaches a saturated result window and then receives an empty page, it is marked `needs_review` with `completion_reason=ambiguous_no_records_after_large_window` instead of being silently completed.
 
 If the error happens before any data is retrieved, it is usually a login/startup connection burst. Start with the safe profile above, confirm records are being written, then increase `MOHKAM_YEAR_WORKERS` and `MOHKAM_GLOBAL_REQUEST_LIMIT` gradually.
 

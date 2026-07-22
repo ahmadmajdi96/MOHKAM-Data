@@ -25,6 +25,20 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_int_list(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return tuple(int(part.strip()) for part in value.split(",") if part.strip())
+
+
+def env_str_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
 def cap_unless_unsafe(value: int, safe_max: int) -> int:
     if ALLOW_UNSAFE_SPEED:
         return value
@@ -55,6 +69,15 @@ END_YEAR = env_int("MOHKAM_END_YEAR", 1850)
 DB = 2
 COUNTRY = 1
 PARENT = -1
+PARENT_SHARDS = env_int_list("MOHKAM_PARENT_SHARDS", (1, 2, 3, 6))
+COURT_SHARDS_RAW = os.environ.get("MOHKAM_COURT_SHARDS", "auto").strip()
+COURT_SHARDS_AUTO = COURT_SHARDS_RAW.lower() == "auto"
+COURT_SHARDS = (
+    ()
+    if COURT_SHARDS_AUTO or COURT_SHARDS_RAW.lower() in {"", "0", "false", "none", "off"}
+    else env_str_list("MOHKAM_COURT_SHARDS", ())
+)
+MAX_COURT_SHARDS = env_int("MOHKAM_MAX_COURT_SHARDS", 0)
 
 HOST_CPU_COUNT = auto_cpu_count()
 TARGET_HOST_UTILIZATION = env_float("MOHKAM_TARGET_HOST_UTILIZATION", 0.90)
@@ -76,7 +99,9 @@ READ_TIMEOUT_SECONDS = env_float("MOHKAM_READ_TIMEOUT_SECONDS", 20)
 RATE_LIMIT_PAUSE_SECONDS = env_int("MOHKAM_RATE_LIMIT_PAUSE_SECONDS", 600)
 NETWORK_PAUSE_SECONDS = env_int("MOHKAM_NETWORK_PAUSE_SECONDS", 120)
 LOGIN_RETRY_PAUSE_SECONDS = env_int("MOHKAM_LOGIN_RETRY_PAUSE_SECONDS", 60)
-YEAR_COMPLETION_PAGE_CAP = env_int("MOHKAM_YEAR_COMPLETION_PAGE_CAP", 2000)
+YEAR_COMPLETION_PAGE_CAP = env_int("MOHKAM_YEAR_COMPLETION_PAGE_CAP", 0)
+EMPTY_PAGE_CONFIRMATIONS = env_int("MOHKAM_EMPTY_PAGE_CONFIRMATIONS", 2)
+EMPTY_PAGE_RETRY_SECONDS = env_float("MOHKAM_EMPTY_PAGE_RETRY_SECONDS", 5.0)
 
 USERNAME = os.environ.get("QISTAS_USERNAME", "")
 PASSWORD = os.environ.get("QISTAS_PASSWORD", "")

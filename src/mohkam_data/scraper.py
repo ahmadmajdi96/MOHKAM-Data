@@ -116,11 +116,11 @@ def request_with_retries(session: requests.Session, method: str, url: str, **kwa
     raise last_error
 
 
-def search_results_url(page_number: int, year: int) -> str:
+def search_results_url(page_number: int, year: int, parent: int = config.PARENT, court_id: str | None = None) -> str:
     params = {
         "main-search-word": "",
         "c": str(config.COUNTRY),
-        "pc": str(config.PARENT),
+        "pc": str(parent),
         "search-type": "1",
         "page-number": str(page_number),
         "from-mainsearch": "-1",
@@ -134,6 +134,8 @@ def search_results_url(page_number: int, year: int) -> str:
         "yearTo": str(year),
         "cdate": "0",
     }
+    if court_id and court_id != "-1":
+        params["advCId"] = court_id
     return f"{config.SEARCH_RESULTS_URL}?{urlencode(params)}"
 
 
@@ -221,22 +223,49 @@ def append_key(key: tuple[str, str]) -> None:
             handle.write(f"{key[0]}\t{key[1]}\n")
 
 
-def state_path(year: int) -> Path:
-    return config.STATE_DIR / f"qistas_state_{year}.json"
+def shard_suffix(year: int, parent: int = config.PARENT, court_id: str | None = None) -> str:
+    if court_id and court_id != "-1":
+        safe_court_id = re.sub(r"[^0-9A-Za-z_-]+", "_", court_id)
+        return f"{year}_court_{safe_court_id}"
+    if parent != config.PARENT:
+        return f"{year}_parent_{parent}"
+    return f"{year}"
 
 
-def load_state(year: int) -> dict[str, Any]:
-    path = state_path(year)
+def state_path(year: int, parent: int = config.PARENT, court_id: str | None = None) -> Path:
+    suffix = shard_suffix(year, parent, court_id)
+    return config.STATE_DIR / f"qistas_state_{suffix}.json"
+
+
+def load_state(year: int, parent: int = config.PARENT, court_id: str | None = None) -> dict[str, Any]:
+    path = state_path(year, parent, court_id)
     if not path.exists():
         return {"last_completed_page": 0, "written_records": 0, "skipped_duplicates": 0, "completed": False}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {"last_completed_page": 0, "written_records": 0, "skipped_duplicates": 0, "completed": False}
+    if (
+        state.get("completed") is True
+        and state.get("completion_reason") == "page_cap"
+        and config.YEAR_COMPLETION_PAGE_CAP <= 0
+    ):
+        state["completed"] = False
+        state["completion_reason"] = "page_cap_reopened"
+    if (
+        state.get("completed") is True
+        and state.get("completion_reason") in {"no_records", "no_records_after_large_window"}
+        and int(state.get("last_checked_page", 0)) > 1
+        and int(state.get("written_records", 0)) >= 19000
+    ):
+        state["completed"] = False
+        state["needs_review"] = True
+        state["completion_reason"] = "ambiguous_no_records_reopened"
+    return state
 
 
-def save_state(year: int, state: dict[str, Any]) -> None:
-    path = state_path(year)
+def save_state(year: int, parent: int, court_id: str | None, state: dict[str, Any]) -> None:
+    path = state_path(year, parent, court_id)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -276,9 +305,92 @@ def fetch_detail(session: requests.Session, record: dict[str, Any], rank: int) -
         return {**record, "rank": rank, "content": "", "detail_error": str(exc)}
 
 
-def scrape_year(year: int) -> None:
+def fetch_page_records(session: requests.Session, page: int, year: int, parent: int, court_id: str | None = None) -> list[dict[str, Any]]:
+    response = request_with_retries(session, "GET", search_results_url(page, year, parent, court_id))
+    return parse_result_blocks(response.text)
+
+
+def is_verified_no_results_html(html_text: str) -> bool:
+    normalized = normalize_text(re.sub(r"<[^>]+>", " ", html_text))
+    return "لا توجد نتائج لعوامل البحث المختارة" in normalized
+
+
+def archive_suspicious_empty_page(year: int, page: int, html_text: str) -> None:
+    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = config.LOG_DIR / f"suspicious_empty_year_{year}_page_{page}_{int(time.time())}.html"
+    path.write_text(html_text, encoding="utf-8", errors="ignore")
+    print(f"[empty-suspicious] year={year} page={page} archived={path}", flush=True)
+
+
+def fetch_page(session: requests.Session, page: int, year: int, parent: int, court_id: str | None = None) -> tuple[list[dict[str, Any]], str]:
+    response = request_with_retries(session, "GET", search_results_url(page, year, parent, court_id))
+    return parse_result_blocks(response.text), response.text
+
+
+def confirm_empty_page(
+    session: requests.Session,
+    page: int,
+    year: int,
+    parent: int,
+    court_id: str | None,
+    html_text: str,
+) -> list[dict[str, Any]]:
+    if not is_verified_no_results_html(html_text):
+        archive_suspicious_empty_page(year, page, html_text)
+        raise RuntimeError(f"Empty parse without verified no-results marker for year={year} page={page}")
+
+    for attempt in range(1, config.EMPTY_PAGE_CONFIRMATIONS + 1):
+        if config.EMPTY_PAGE_RETRY_SECONDS > 0:
+            time.sleep(config.EMPTY_PAGE_RETRY_SECONDS)
+        records, retry_html = fetch_page(session, page, year, parent, court_id)
+        print(
+            f"[empty-check] year={year} parent={parent} court={court_id or '-'} page={page} "
+            f"attempt={attempt}/{config.EMPTY_PAGE_CONFIRMATIONS} records={len(records)}",
+            flush=True,
+        )
+        if records:
+            return records
+        if not is_verified_no_results_html(retry_html):
+            archive_suspicious_empty_page(year, page, retry_html)
+            raise RuntimeError(f"Empty retry without verified no-results marker for year={year} page={page}")
+    return []
+
+
+def discover_court_shards(session: requests.Session) -> tuple[str, ...]:
+    response = request_with_retries(session, "GET", f"{config.BASE_URL}/ar/search?c={config.COUNTRY}&pc={config.PARENT}&db={config.DB}")
+    select_match = re.search(
+        r'<select[^>]+id="courtNamesQuickSearch"[^>]*>(.*?)</select>',
+        response.text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not select_match:
+        raise RuntimeError("Could not discover court shards from courtNamesQuickSearch.")
+
+    court_ids: list[str] = []
+    seen: set[str] = set()
+    for value in re.findall(r'<option[^>]+value="([^"]+)"', select_match.group(1), re.IGNORECASE):
+        if value == "-1" or value in seen:
+            continue
+        seen.add(value)
+        court_ids.append(value)
+
+    if config.MAX_COURT_SHARDS > 0:
+        court_ids = court_ids[: config.MAX_COURT_SHARDS]
+    if not court_ids:
+        raise RuntimeError("Court shard discovery returned no courts.")
+    return tuple(court_ids)
+
+
+def configured_court_shards() -> tuple[str, ...]:
+    if config.COURT_SHARDS_AUTO:
+        session = login()
+        return discover_court_shards(session)
+    return config.COURT_SHARDS
+
+
+def scrape_year(year: int, parent: int = config.PARENT, court_id: str | None = None) -> None:
     ensure_dirs()
-    state = load_state(year)
+    state = load_state(year, parent, court_id)
     if state.get("completed"):
         return
 
@@ -287,23 +399,42 @@ def scrape_year(year: int) -> None:
     print(f"[dedupe] loaded {len(existing_keys)} keys", flush=True)
     page = int(state.get("last_completed_page", 0)) + 1
 
-    while page <= config.YEAR_COMPLETION_PAGE_CAP:
+    while config.YEAR_COMPLETION_PAGE_CAP <= 0 or page <= config.YEAR_COMPLETION_PAGE_CAP:
         try:
-            response = request_with_retries(session, "GET", search_results_url(page, year))
-            page_records = parse_result_blocks(response.text)
+            page_records, page_html = fetch_page(session, page, year, parent, court_id)
         except RateLimitedError as exc:
-            print(f"[pause] year={year} page={page} rate_limited={exc.status_code}", flush=True)
+            print(f"[pause] year={year} parent={parent} court={court_id or '-'} page={page} rate_limited={exc.status_code}", flush=True)
             time.sleep(config.RATE_LIMIT_PAUSE_SECONDS)
             continue
         except requests.RequestException as exc:
-            print(f"[pause] year={year} page={page} network={exc}", flush=True)
+            print(f"[pause] year={year} parent={parent} court={court_id or '-'} page={page} network={exc}", flush=True)
             time.sleep(config.NETWORK_PAUSE_SECONDS)
             continue
 
         if not page_records:
-            state.update({"completed": True, "completion_reason": "no_records", "last_checked_page": page})
-            save_state(year, state)
-            print(f"[complete] year={year} reason=no_records page={page}", flush=True)
+            page_records = confirm_empty_page(session, page, year, parent, court_id, page_html)
+
+        if not page_records:
+            completion_reason = "no_records"
+            if page > 1 and int(state.get("written_records", 0)) >= 19000:
+                completion_reason = "ambiguous_no_records_after_large_window"
+                state.update(
+                    {
+                        "completed": False,
+                        "needs_review": True,
+                        "completion_reason": completion_reason,
+                        "last_checked_page": page,
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    }
+                )
+                save_state(year, parent, court_id, state)
+                raise RuntimeError(
+                    f"Ambiguous empty page after saturated window year={year} parent={parent} "
+                    f"court={court_id or '-'} page={page}; add finer shards before marking complete."
+                )
+            state.update({"completed": True, "completion_reason": completion_reason, "last_checked_page": page})
+            save_state(year, parent, court_id, state)
+            print(f"[complete] year={year} parent={parent} court={court_id or '-'} reason={completion_reason} page={page}", flush=True)
             return
 
         before = len(page_records)
@@ -322,7 +453,11 @@ def scrape_year(year: int) -> None:
                     try:
                         detail = future.result()
                     except RateLimitedError as exc:
-                        print(f"[pause] year={year} page={page} detail_rate_limited={exc.status_code}", flush=True)
+                        print(
+                            f"[pause] year={year} parent={parent} court={court_id or '-'} page={page} "
+                            f"detail_rate_limited={exc.status_code}",
+                            flush=True,
+                        )
                         time.sleep(config.RATE_LIMIT_PAUSE_SECONDS)
                         detail = None
                     except Exception as exc:  # noqa: BLE001
@@ -336,6 +471,8 @@ def scrape_year(year: int) -> None:
             with config.OUTPUT_FILE.open("a", encoding="utf-8") as output:
                 for record in enriched:
                     record["_year"] = year
+                    record["_parent"] = parent
+                    record["_court_id"] = court_id
                     record["_page"] = page
                     output.write(json.dumps(record, ensure_ascii=False) + "\n")
                     key = record_key(record)
@@ -350,15 +487,26 @@ def scrape_year(year: int) -> None:
                 "written_records": int(state.get("written_records", 0)) + written_this_page,
                 "completed": False,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "filters": {"db": config.DB, "country": config.COUNTRY, "parent": config.PARENT, "year_from": year, "year_to": year},
+                "filters": {
+                    "db": config.DB,
+                    "country": config.COUNTRY,
+                    "parent": parent,
+                    "court_id": court_id,
+                    "year_from": year,
+                    "year_to": year,
+                },
             }
         )
-        save_state(year, state)
-        print(f"[page] year={year} page={page} written={written_this_page} skipped={before - len(page_records)}", flush=True)
+        save_state(year, parent, court_id, state)
+        print(
+            f"[page] year={year} parent={parent} court={court_id or '-'} page={page} "
+            f"written={written_this_page} skipped={before - len(page_records)}",
+            flush=True,
+        )
         page += 1
         if config.PAGE_DELAY_SECONDS > 0:
             time.sleep(config.PAGE_DELAY_SECONDS)
 
     state.update({"completed": True, "completion_reason": "page_cap", "last_checked_page": page})
-    save_state(year, state)
-    print(f"[complete] year={year} reason=page_cap", flush=True)
+    save_state(year, parent, court_id, state)
+    print(f"[complete] year={year} parent={parent} court={court_id or '-'} reason=page_cap", flush=True)
