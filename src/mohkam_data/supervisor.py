@@ -8,7 +8,12 @@ from . import config
 from .scraper import ensure_dirs, load_state, scrape_year
 
 
-def run_year_until_complete(year: int) -> int:
+def run_year_until_complete(year: int, worker_index: int) -> int:
+    if config.YEAR_START_STAGGER_SECONDS > 0 and worker_index > 0:
+        sleep_for = config.YEAR_START_STAGGER_SECONDS * worker_index
+        print(f"[supervisor] year={year} startup_stagger={sleep_for:.1f}s", flush=True)
+        time.sleep(sleep_for)
+
     while True:
         state = load_state(year)
         if state.get("completed"):
@@ -20,8 +25,8 @@ def run_year_until_complete(year: int) -> int:
         except KeyboardInterrupt:
             raise
         except Exception as exc:  # noqa: BLE001
-            print(f"[supervisor] year={year} crashed={exc}; retrying in 60s", file=sys.stderr, flush=True)
-            time.sleep(60)
+            print(f"[supervisor] year={year} crashed={exc}; retrying in {config.LOGIN_RETRY_PAUSE_SECONDS}s", file=sys.stderr, flush=True)
+            time.sleep(config.LOGIN_RETRY_PAUSE_SECONDS)
 
 
 def main() -> int:
@@ -32,6 +37,7 @@ def main() -> int:
         f"target_host_utilization={config.TARGET_HOST_UTILIZATION} "
         f"year_workers={config.YEAR_WORKERS} "
         f"detail_concurrency_per_year={config.DETAIL_CONCURRENCY_PER_YEAR} "
+        f"global_request_limit={config.GLOBAL_REQUEST_LIMIT} "
         f"pending_years={len(years)}",
         flush=True,
     )
@@ -41,7 +47,10 @@ def main() -> int:
         return 0
 
     with ThreadPoolExecutor(max_workers=max(1, config.YEAR_WORKERS)) as executor:
-        future_map = {executor.submit(run_year_until_complete, year): year for year in years}
+        future_map = {
+            executor.submit(run_year_until_complete, year, index): year
+            for index, year in enumerate(years)
+        }
         for future in as_completed(future_map):
             year = future_map[future]
             try:

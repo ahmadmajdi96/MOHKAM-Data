@@ -64,8 +64,7 @@ def login() -> requests.Session:
         }
     )
 
-    login_page = session.get(config.LOGIN_URL, timeout=30)
-    login_page.raise_for_status()
+    login_page = request_with_retries(session, "GET", config.LOGIN_URL, timeout=30)
     token_match = re.search(
         r'<input[^>]+name="_token"[^>]+value="([^"]+)"',
         login_page.text,
@@ -74,7 +73,9 @@ def login() -> requests.Session:
     if not token_match:
         raise RuntimeError("Could not find CSRF token on login page.")
 
-    response = session.post(
+    response = request_with_retries(
+        session,
+        "POST",
         config.AUTH_URL,
         data={
             "_token": token_match.group(1),
@@ -86,7 +87,6 @@ def login() -> requests.Session:
         timeout=30,
         allow_redirects=True,
     )
-    response.raise_for_status()
     if "login" in response.url.lower():
         raise RuntimeError(f"Login failed; landed on {response.url}")
     return session
