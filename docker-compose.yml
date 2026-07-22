@@ -1,0 +1,30 @@
+services:
+  mohkam-scraper:
+    build: .
+    container_name: mohkam-data-scraper
+    restart: unless-stopped
+    environment:
+      PYTHONPATH: /app/src
+      QISTAS_USERNAME: ${QISTAS_USERNAME:-}
+      QISTAS_PASSWORD: ${QISTAS_PASSWORD:-}
+    volumes:
+      - ./data:/app/data
+    command:
+      - python
+      - -m
+      - mohkam_data.supervisor
+
+  monitor:
+    build: .
+    profiles:
+      - tools
+    environment:
+      PYTHONPATH: /app/src
+      QISTAS_USERNAME: ${QISTAS_USERNAME:-}
+      QISTAS_PASSWORD: ${QISTAS_PASSWORD:-}
+    volumes:
+      - ./data:/app/data
+    command:
+      - python
+      - -m
+      - mohkam_data.monitor
